@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from io import StringIO
+from pathlib import Path
 import math
 import re
-from typing import Tuple, Dict
+import time
+from typing import Dict
 
 import pandas as pd
 import requests
@@ -14,13 +13,72 @@ import streamlit as st
 ANAGRAFICA_URL = "https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
 PREZZI_URL = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
 
-UA = "CarburanteCAP/1.0 (consumer price comparison; source MIMIT open data)"
+LOCAL_ANAGRAFICA = Path(__file__).resolve().parent / "anagrafica_impianti_attivi.csv"
+LOCAL_PREZZI = Path(__file__).resolve().parent / "prezzo_alle_8.csv"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/127.0 Safari/537.36"
+    ),
+    "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9,en;q=0.7",
+    "Referer": (
+        "https://www.mimit.gov.it/it/open-data/elenco-dataset/"
+        "carburanti-prezzi-praticati-e-anagrafica-degli-impianti"
+    ),
+    "Cache-Control": "no-cache",
+}
 
 
-def _download_text(url: str) -> str:
-    r = requests.get(url, timeout=35, headers={"User-Agent": UA})
-    r.raise_for_status()
-    return r.content.decode("utf-8", errors="replace")
+def _looks_like_mimit_csv(text: str, kind: str) -> bool:
+    if not text or len(text) < 200:
+        return False
+    head = text[:1200]
+    if "Estrazione del " not in head:
+        return False
+    if kind == "anagrafica":
+        return "idImpianto|Gestore|Bandiera|" in head
+    return "idImpianto|descCarburante|prezzo|isSelf|dtComu" in head
+
+
+def _download_text(url: str, kind: str) -> str:
+    """
+    Prova più volte il download MIMIT con header da browser.
+    Se Streamlit Cloud/MIMIT rifiutano la richiesta, solleva un errore
+    e il chiamante userà lo snapshot locale ufficiale.
+    """
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                url,
+                timeout=40,
+                headers=HEADERS,
+                allow_redirects=True,
+            )
+            r.raise_for_status()
+            text = r.content.decode("utf-8-sig", errors="replace")
+            if _looks_like_mimit_csv(text, kind):
+                return text
+            preview = text[:120].replace("\n", " ")
+            last_error = RuntimeError(
+                f"Risposta MIMIT non riconosciuta ({len(text)} caratteri): {preview!r}"
+            )
+        except Exception as exc:
+            last_error = exc
+        time.sleep(1.2 * (attempt + 1))
+    raise RuntimeError(str(last_error) if last_error else "Download MIMIT non riuscito.")
+
+
+def _read_local_snapshot(path: Path, kind: str) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Snapshot locale mancante: {path.name}")
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    if not _looks_like_mimit_csv(text, kind):
+        raise ValueError(f"Snapshot locale {path.name} non valido.")
+    return text
 
 
 def _extract_date(first_line: str) -> str | None:
@@ -28,13 +86,7 @@ def _extract_date(first_line: str) -> str | None:
     return m.group(1) if m else None
 
 
-def parse_anagrafica(text: str) -> tuple[pd.DataFrame, str | None]:
-    """
-    Parser robusto per l'anagrafica MIMIT.
-    Dal 10/02/2026 il separatore è '|'. Alcune descrizioni possono comunque
-    contenere caratteri anomali: se una riga ha campi in eccesso, preserviamo
-    i primi 5 e gli ultimi 4, ricomponendo la parte centrale come Indirizzo.
-    """
+def parse_anagrafica(text: str):
     lines = text.splitlines()
     if len(lines) < 3:
         raise ValueError("File anagrafica MIMIT vuoto o non valido.")
@@ -56,7 +108,6 @@ def parse_anagrafica(text: str) -> tuple[pd.DataFrame, str | None]:
         if len(parts) < 10:
             continue
         if len(parts) > 10:
-            # 5 campi iniziali + indirizzo ricomposto + 4 campi finali
             parts = parts[:5] + [" | ".join(parts[5:-4])] + parts[-4:]
         rows.append(parts[:10])
 
@@ -64,8 +115,6 @@ def parse_anagrafica(text: str) -> tuple[pd.DataFrame, str | None]:
     df["idImpianto"] = df["idImpianto"].astype(str).str.strip()
     df["Latitudine"] = pd.to_numeric(df["Latitudine"], errors="coerce")
     df["Longitudine"] = pd.to_numeric(df["Longitudine"], errors="coerce")
-
-    # CAP ricavato dall'indirizzo ufficiale MIMIT.
     df["CAP"] = (
         df["Indirizzo"]
         .astype(str)
@@ -74,7 +123,7 @@ def parse_anagrafica(text: str) -> tuple[pd.DataFrame, str | None]:
     return df, extraction_date
 
 
-def parse_prezzi(text: str) -> tuple[pd.DataFrame, str | None]:
+def parse_prezzi(text: str):
     lines = text.splitlines()
     if len(lines) < 3:
         raise ValueError("File prezzi MIMIT vuoto o non valido.")
@@ -100,8 +149,17 @@ def parse_prezzi(text: str) -> tuple[pd.DataFrame, str | None]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_mimit_data():
-    anagrafica_text = _download_text(ANAGRAFICA_URL)
-    prezzi_text = _download_text(PREZZI_URL)
+    source = "MIMIT diretto"
+    direct_error = None
+
+    try:
+        anagrafica_text = _download_text(ANAGRAFICA_URL, "anagrafica")
+        prezzi_text = _download_text(PREZZI_URL, "prezzi")
+    except Exception as exc:
+        direct_error = str(exc)
+        source = "snapshot MIMIT di sicurezza"
+        anagrafica_text = _read_local_snapshot(LOCAL_ANAGRAFICA, "anagrafica")
+        prezzi_text = _read_local_snapshot(LOCAL_PREZZI, "prezzi")
 
     impianti, anag_date = parse_anagrafica(anagrafica_text)
     prezzi, price_date = parse_prezzi(prezzi_text)
@@ -109,6 +167,8 @@ def load_mimit_data():
     meta = {
         "anagrafica_date": anag_date,
         "prezzi_date": price_date,
+        "source": source,
+        "direct_error": direct_error,
         "anagrafica_url": ANAGRAFICA_URL,
         "prezzi_url": PREZZI_URL,
     }
@@ -123,8 +183,15 @@ def haversine_km(lat1, lon1, lat2_series, lon2_series):
     lon2r = lon2_series.map(math.radians)
     dlat = lat2r - lat1r
     dlon = lon2r - lon1r
-    a = (dlat / 2).map(math.sin) ** 2 + math.cos(lat1r) * lat2r.map(math.cos) * (dlon / 2).map(math.sin) ** 2
-    return 2 * r * a.map(lambda x: math.asin(min(1.0, math.sqrt(max(0.0, x)))))
+    a = (
+        (dlat / 2).map(math.sin) ** 2
+        + math.cos(lat1r)
+        * lat2r.map(math.cos)
+        * (dlon / 2).map(math.sin) ** 2
+    )
+    return 2 * r * a.map(
+        lambda x: math.asin(min(1.0, math.sqrt(max(0.0, x))))
+    )
 
 
 def _service_value(servizio: str):
@@ -155,10 +222,9 @@ def find_cheapest_stations(
     if cap_points.empty:
         raise ValueError(
             f"Il CAP {cap} non compare nelle anagrafiche degli impianti MIMIT. "
-            "Per una versione commerciale conviene aggiungere un database CAP→coordinate."
+            "Prova un CAP vicino oppure aumenta il raggio dopo aver scelto un CAP presente."
         )
 
-    # Mediana più robusta di una media in presenza di coordinate anomale.
     center_lat = float(cap_points["Latitudine"].median())
     center_lon = float(cap_points["Longitudine"].median())
 
@@ -171,11 +237,9 @@ def find_cheapest_stations(
         p = p[p["isSelf"] == service]
 
     p = p[p["prezzo"].notna() & (p["prezzo"] > 0)]
-
-    # In caso di duplicati per impianto/modalità, teniamo il prezzo minimo disponibile.
     p = (
         p.sort_values(["idImpianto", "prezzo"])
-         .drop_duplicates(subset=["idImpianto"], keep="first")
+        .drop_duplicates(subset=["idImpianto"], keep="first")
     )
 
     merged = impianti.merge(p, on="idImpianto", how="inner")
@@ -184,10 +248,7 @@ def find_cheapest_stations(
     ].copy()
 
     merged["distanza_km"] = haversine_km(
-        center_lat,
-        center_lon,
-        merged["Latitudine"],
-        merged["Longitudine"],
+        center_lat, center_lon, merged["Latitudine"], merged["Longitudine"]
     )
 
     nearby = merged[merged["distanza_km"] <= float(radius_km)].copy()
@@ -207,4 +268,13 @@ def find_cheapest_stations(
 def extraction_summary(meta: Dict) -> str:
     p = meta.get("prezzi_date") or "data non disponibile"
     a = meta.get("anagrafica_date") or "data non disponibile"
-    return f"Dataset MIMIT: prezzi estratti il {p}; anagrafica estratta il {a}."
+    source = meta.get("source", "MIMIT")
+    if source == "MIMIT diretto":
+        return (
+            f"Dati caricati direttamente dal MIMIT — prezzi: {p}; "
+            f"anagrafica: {a}."
+        )
+    return (
+        f"MIMIT diretto temporaneamente non raggiungibile da Streamlit: "
+        f"uso snapshot ufficiale di sicurezza — prezzi: {p}; anagrafica: {a}."
+    )

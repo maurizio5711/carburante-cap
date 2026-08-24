@@ -172,30 +172,72 @@ def _respect_nominatim_rate_limit():
         state["last_request"] = time.monotonic()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def geocode_address(address: str):
-    """
-    Geocodifica un singolo indirizzo italiano tramite OpenStreetMap/Nominatim.
-    Nessun autocomplete: la richiesta parte solo quando l'utente preme Cerca.
-    """
-    query = address.strip()
-    if "italia" not in query.lower() and "italy" not in query.lower():
-        query = f"{query}, Italia"
+def _split_street_city(address: str):
+    """Prova a separare via/civico e comune dall'input dell'utente."""
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    if len(parts) < 2:
+        return address.strip(), None
 
-    params = {
-        "q": query,
-        "format": "jsonv2",
-        "limit": 1,
-        "countrycodes": "it",
-        "addressdetails": 1,
-    }
+    # Se l'ultima parte sembra una sigla provincia (RM, MI, TO...), usa la penultima come comune.
+    if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2}", parts[-1]):
+        city = parts[-2]
+        street = ", ".join(parts[:-2])
+    else:
+        city = parts[-1]
+        street = ", ".join(parts[:-1])
+
+    return street.strip(), city.strip()
+
+
+def _city_match_score(item, city_hint: str | None) -> int:
+    if not city_hint:
+        return 1
+
+    target = _normalize_name(city_hint)
+    if not target:
+        return 1
+
+    address = item.get("address") or {}
+    primary_fields = [
+        address.get("city"),
+        address.get("town"),
+        address.get("village"),
+        address.get("municipality"),
+    ]
+    other_fields = [
+        address.get("city_district"),
+        address.get("county"),
+        address.get("state"),
+    ]
+
+    score = 0
+    for value in primary_fields:
+        norm = _normalize_name(value or "")
+        if not norm:
+            continue
+        if norm == target:
+            score = max(score, 120)
+        elif target in norm or norm in target:
+            score = max(score, 90)
+
+    for value in other_fields:
+        norm = _normalize_name(value or "")
+        if target and target in norm:
+            score = max(score, 55)
+
+    display = _normalize_name(item.get("display_name", ""))
+    if target and target in display:
+        score = max(score, 45)
+
+    return score
+
+
+def _nominatim_search(params):
     headers = {
-        "User-Agent": f"CarburanteIndirizzo/1.0 ({REPO_URL})",
+        "User-Agent": f"CarburanteIndirizzo/1.1 ({REPO_URL})",
         "Accept-Language": "it",
     }
-
     _respect_nominatim_rate_limit()
-
     response = requests.get(
         NOMINATIM_URL,
         params=params,
@@ -203,16 +245,75 @@ def geocode_address(address: str):
         timeout=15,
     )
     response.raise_for_status()
-    data = response.json()
+    return response.json()
 
-    if not data:
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_address(address: str):
+    """
+    Geocodifica un indirizzo italiano tramite OpenStreetMap/Nominatim.
+    Prima usa una ricerca strutturata (via + comune) per ridurre gli omonimi;
+    se non basta, prova la ricerca libera. Non usa autocomplete.
+    """
+    raw = address.strip()
+    street, city_hint = _split_street_city(raw)
+
+    candidates = []
+
+    # Ricerca strutturata: è molto più affidabile quando l'utente indica il comune.
+    if city_hint and street:
+        params = {
+            "street": street,
+            "city": city_hint,
+            "country": "Italia",
+            "format": "jsonv2",
+            "limit": 5,
+            "countrycodes": "it",
+            "addressdetails": 1,
+            "dedupe": 1,
+        }
+        candidates = _nominatim_search(params)
+
+    # Fallback su ricerca libera se la strutturata non restituisce nulla.
+    if not candidates:
+        query = raw
+        if "italia" not in query.lower() and "italy" not in query.lower():
+            query = f"{query}, Italia"
+        params = {
+            "q": query,
+            "format": "jsonv2",
+            "limit": 5,
+            "countrycodes": "it",
+            "addressdetails": 1,
+            "dedupe": 1,
+        }
+        candidates = _nominatim_search(params)
+
+    if not candidates:
         return None
 
-    item = data[0]
+    ranked = sorted(
+        candidates,
+        key=lambda item: _city_match_score(item, city_hint),
+        reverse=True,
+    )
+    item = ranked[0]
+    score = _city_match_score(item, city_hint)
+
+    # Se l'utente ha indicato un comune ma Nominatim restituisce un altro comune,
+    # non avviamo la ricerca carburanti da un punto sbagliato.
+    if city_hint and score < 45:
+        return {
+            "ambiguous": True,
+            "display_name": item.get("display_name", raw),
+            "city_hint": city_hint,
+        }
+
     return {
         "lat": float(item["lat"]),
         "lon": float(item["lon"]),
-        "display_name": item.get("display_name", query),
+        "display_name": item.get("display_name", raw),
+        "ambiguous": False,
     }
 
 
@@ -379,7 +480,7 @@ with st.form("search_form"):
     address = st.text_input(
         "Inserisci indirizzo",
         placeholder="Esempio: Via Nomentana 150, Roma",
-        help="Per una ricerca più precisa inserisci via/piazza, numero civico e comune.",
+        help="Per una ricerca più precisa inserisci via/piazza, numero civico, comune e, se serve, provincia.",
     )
 
     c1, c2, c3 = st.columns(3)
@@ -424,6 +525,16 @@ if submitted:
                     st.error(
                         "Non riesco a localizzare l'indirizzo. "
                         "Prova ad aggiungere numero civico, comune e provincia."
+                    )
+                elif location.get("ambiguous"):
+                    st.session_state.pop("fuel_results", None)
+                    st.error(
+                        "L'indirizzo è ambiguo: il risultato trovato non sembra appartenere "
+                        f"al comune **{location.get('city_hint', '')}**. "
+                        "Aggiungi la provincia, per esempio: `Via Nomentana 150, Roma, RM`."
+                    )
+                    st.caption(
+                        "Risultato scartato: " + location.get("display_name", "")
                     )
                 else:
                     plants, prices = load_mimit_data()

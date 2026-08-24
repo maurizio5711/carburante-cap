@@ -1,95 +1,77 @@
-# Carburante CAP – prototipo web app
+# Carburante vicino a te – ricerca per indirizzo (v1.1)
 
-Web app Streamlit per trovare le stazioni di carburante più economiche in una zona italiana partendo dal CAP.
+Web app Streamlit per trovare i distributori di carburante più convenienti vicino a un **indirizzo italiano**.
 
 ## Funzioni
 
-- Inserimento CAP italiano
+- Inserimento di un indirizzo: via/piazza, numero civico e comune
+- Geocodifica dell'indirizzo tramite OpenStreetMap / Nominatim
 - Benzina, Gasolio, GPL e Metano
 - Self service, servito o qualsiasi modalità
 - Raggio da 2 a 30 km
 - Classifica per prezzo crescente
-- Distanza stimata dal centro del CAP
+- Distanza stimata in linea d'aria dall'indirizzo inserito
 - Mappa degli impianti
-- Data/ora dell'ultima comunicazione del prezzo
-- Esportazione CSV
-- Cache dei dataset per ridurre i download
-- Pulsante **Aggiorna dati ora** per svuotare la cache e forzare un nuovo download MIMIT
+- Data/ora dell'ultima comunicazione del prezzo quando disponibile
+- Esportazione CSV dei risultati
+- Cache dei dataset per ridurre le richieste ai servizi esterni
 
-## Fonte dati
+## Fonte prezzi e impianti
 
 Ministero delle Imprese e del Made in Italy (MIMIT):
 
-- Anagrafica impianti:
-  https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv
-- Prezzi:
-  https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv
+- `https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv`
+- `https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv`
 
-I dati sono open data MIMIT con licenza IODL 2.0.
-Dal 10 febbraio 2026 il separatore dei file è `|`.
+L'app tenta di usare i file online MIMIT. Se il download non è disponibile, può usare come fallback i file locali presenti nel repository:
 
-### Nota sulla freschezza
+- `anagrafica_impianti_attivi.csv`
+- `prezzo_alle_8.csv`
 
-La versione open data è pubblicata quotidianamente e contiene i prezzi in vigore alle ore 8 del giorno precedente alla pubblicazione.
-Per un servizio realmente "live" è preferibile usare un'API ufficiale MIMIT, se resa disponibile, o un feed autorizzato.
-Non è consigliabile basare un prodotto commerciale sullo scraping non documentato del sito pubblico.
+## Geocodifica
 
-## Come avviare in locale
+La trasformazione indirizzo → coordinate è effettuata tramite OpenStreetMap / Nominatim.
+
+La richiesta parte soltanto quando l'utente preme il pulsante di ricerca: non viene usato un sistema di autocomplete.
+
+La versione include cache e limitazione a circa una richiesta al secondo, in linea con la policy del server pubblico Nominatim. Il servizio pubblico è adatto a traffico leggero; per traffico significativo o uso commerciale continuativo è opportuno passare a un provider dedicato o a un'istanza propria di Nominatim.
+
+## Installazione locale
 
 ```bash
 python -m venv .venv
-# Windows:
+
+# Windows
 .venv\Scripts\activate
-# macOS/Linux:
+
+# macOS / Linux
 source .venv/bin/activate
 
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Apri quindi l'indirizzo mostrato da Streamlit, normalmente `http://localhost:8501`.
+## Pubblicazione su Streamlit Community Cloud
 
-## Pubblicazione
+Il file principale resta:
 
-La stessa app può essere pubblicata su:
+```text
+app.py
+```
 
-- Streamlit Community Cloud
-- Render
-- Railway
-- un VPS
-- Docker / cloud provider
+Dopo il commit sul branch collegato a Streamlit, l'app viene normalmente ridistribuita automaticamente.
 
-Per un prodotto finale è consigliabile:
-1. aggiungere un database completo CAP → coordinate/comuni;
-2. salvare i dataset MIMIT in un database aggiornato automaticamente;
-3. aggiungere cronologia prezzi;
-4. notifiche "prezzo sotto soglia";
-5. calcolo del risparmio reale considerando distanza e consumo dell'auto;
-6. PWA/app mobile oppure frontend React/Flutter con backend API.
+## Nota sui dati
 
-## Disclaimer
+La distanza è calcolata in linea d'aria e non corrisponde necessariamente al tragitto stradale.
 
-Le coordinate degli impianti sono comunicate dai gestori e, secondo i metadati MIMIT, sono inserite su base volontaria e non sempre verificate.
-Verificare il prezzo alla pompa prima del rifornimento.
+I prezzi dipendono dall'ultimo aggiornamento disponibile nella fonte MIMIT. Prima del rifornimento è sempre opportuno verificare il prezzo esposto presso l'impianto.
+
+## Privacy
+
+Il codice dell'app non salva l'indirizzo in un database. L'indirizzo inserito viene trasmesso al servizio di geocodifica per convertirlo in coordinate.
 
 
-## Pulsante Aggiorna
+## Correzione v1.1
 
-Il pulsante **🔄 Aggiorna dati ora**:
-1. svuota la cache Streamlit;
-2. forza un nuovo download dell'anagrafica e dei prezzi MIMIT;
-3. mantiene invariati i filtri dell'app;
-4. fa sì che la ricerca successiva utilizzi i file più recenti disponibili sul server MIMIT.
-
-Importante: il pulsante può scaricare soltanto la versione più recente **già pubblicata dal MIMIT**. Non può rendere i dati più freschi del file ufficiale disponibile in quel momento.
-
-
-## Interfaccia V3
-
-La ricerca principale è stata semplificata:
-- **CAP grande al centro della schermata**
-- grande pulsante verde **“TROVA IL CARBURANTE PIÙ ECONOMICO”**
-- filtri secondari nella barra laterale
-- pulsante **“Aggiorna dati ora”** separato dai comandi di ricerca
-
-Questo rende immediatamente evidente dove inserire il CAP.
+La geocodifica usa prima una ricerca strutturata via/civico + comune e scarta i risultati che non corrispondono al comune indicato, riducendo il rischio di omonimie (es. Roma/Mentana).

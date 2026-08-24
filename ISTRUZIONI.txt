@@ -19,7 +19,7 @@ ISTRUZIONI RAPIDE – VERSIONE CON INDIRIZZO
    Se l'app non riparte automaticamente, apri la dashboard Streamlit e usa Reboot/Rerun.
 
 6. Prova per esempio:
-   Via Nomentana 150, Roma
+   Via Nomentana 150, Roma, RM
 
 7. Controlla:
    - localizzazione indirizzo

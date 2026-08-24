@@ -1,0 +1,35 @@
+ISTRUZIONI RAPIDE – VERSIONE CON INDIRIZZO
+
+1. Apri il repository:
+   https://github.com/maurizio5711/carburante-cap
+
+2. Sostituisci questi tre file:
+   - app.py
+   - requirements.txt
+   - README.md
+
+3. NON eliminare i due CSV già presenti:
+   - anagrafica_impianti_attivi.csv
+   - prezzo_alle_8.csv
+   Servono anche come fallback se il download MIMIT non risponde.
+
+4. Salva/Commit sul branch main.
+
+5. Streamlit Community Cloud dovrebbe rilevare automaticamente il nuovo commit.
+   Se l'app non riparte automaticamente, apri la dashboard Streamlit e usa Reboot/Rerun.
+
+6. Prova per esempio:
+   Via Nomentana 150, Roma
+
+7. Controlla:
+   - localizzazione indirizzo
+   - raggio
+   - carburante
+   - modalità Self/Servito
+   - classifica prezzi
+   - mappa
+   - download CSV
+
+Nota:
+La versione non richiede una chiave Google Maps.
+La geocodifica usa OpenStreetMap/Nominatim.

@@ -173,20 +173,48 @@ def _respect_nominatim_rate_limit():
 
 
 def _split_street_city(address: str):
-    """Prova a separare via/civico e comune dall'input dell'utente."""
-    parts = [p.strip() for p in address.split(",") if p.strip()]
-    if len(parts) < 2:
-        return address.strip(), None
+    """
+    Prova a separare via/civico e comune dall'input dell'utente.
 
-    # Se l'ultima parte sembra una sigla provincia (RM, MI, TO...), usa la penultima come comune.
-    if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2}", parts[-1]):
-        city = parts[-2]
-        street = ", ".join(parts[:-2])
-    else:
-        city = parts[-1]
-        street = ", ".join(parts[:-1])
+    Gestisce sia:
+      - "Via Nomentana 150, Roma"
+      - "Via Nomentana 150 Roma"
+      - "Via Nomentana 150, Roma, RM"
 
-    return street.strip(), city.strip()
+    Quando non ci sono virgole, usa il numero civico come punto di separazione.
+    """
+    raw = re.sub(r"\\s+", " ", address.strip())
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+
+    if len(parts) >= 2:
+        # Se l'ultima parte sembra una sigla provincia (RM, MI, TO...), usa la penultima come comune.
+        if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2}", parts[-1]):
+            city = parts[-2]
+            street = ", ".join(parts[:-2])
+        else:
+            city = parts[-1]
+            street = ", ".join(parts[:-1])
+        return street.strip(), city.strip()
+
+    # Caso senza virgole: separa dopo il civico.
+    # Esempi gestiti: 150, 150A, 150/A, 150-bis.
+    match = re.match(
+        r"^(.*?\\b\\d+[A-Za-z]?(?:/[A-Za-z0-9]+)?(?:-bis)?)\\s+(.+)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        street = match.group(1).strip()
+        city = match.group(2).strip()
+
+        # Se l'utente termina con una sigla provincia, rimuovila dal comune.
+        city_parts = city.split()
+        if len(city_parts) >= 2 and re.fullmatch(r"[A-Za-z]{2}", city_parts[-1]):
+            city = " ".join(city_parts[:-1]).strip()
+
+        return street, city
+
+    return raw, None
 
 
 def _city_match_score(item, city_hint: str | None) -> int:
@@ -232,6 +260,51 @@ def _city_match_score(item, city_hint: str | None) -> int:
     return score
 
 
+def _candidate_matches_city(item, city_hint: str | None) -> bool:
+    """
+    Verifica il COMUNE/località del risultato, non la provincia/contea.
+    Evita quindi che "Mentana, Roma" venga accettato come se il comune fosse Roma.
+    """
+    if not city_hint:
+        return True
+
+    target = _normalize_name(city_hint)
+    if not target:
+        return True
+
+    address = item.get("address") or {}
+
+    # Se Nominatim restituisce una località esplicita, questa ha priorità assoluta.
+    locality_values = [
+        address.get("city"),
+        address.get("town"),
+        address.get("village"),
+        address.get("hamlet"),
+    ]
+    locality_values = [v for v in locality_values if str(v or "").strip()]
+
+    if locality_values:
+        for value in locality_values:
+            norm = _normalize_name(value)
+            if norm == target:
+                return True
+            # Consente casi come "Roma Capitale" quando il target è "Roma".
+            if norm.startswith(target) or target.startswith(norm):
+                return True
+        return False
+
+    # Solo se manca del tutto city/town/village/hamlet, usa municipality.
+    municipality = _normalize_name(address.get("municipality") or "")
+    if municipality:
+        return (
+            municipality == target
+            or municipality.startswith(target)
+            or target.startswith(municipality)
+        )
+
+    return False
+
+
 def _nominatim_search(params):
     headers = {
         "User-Agent": f"CarburanteIndirizzo/1.1 ({REPO_URL})",
@@ -249,7 +322,7 @@ def _nominatim_search(params):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocode_address(address: str):
+def geocode_address_v2(address: str):
     """
     Geocodifica un indirizzo italiano tramite OpenStreetMap/Nominatim.
     Prima usa una ricerca strutturata (via + comune) per ridurre gli omonimi;
@@ -292,22 +365,29 @@ def geocode_address(address: str):
     if not candidates:
         return None
 
+    # Se l'utente ha specificato un comune, elimina prima i risultati
+    # appartenenti a un altro comune. La provincia "Roma" non basta.
+    if city_hint:
+        matching_candidates = [
+            item for item in candidates
+            if _candidate_matches_city(item, city_hint)
+        ]
+        if matching_candidates:
+            candidates = matching_candidates
+        else:
+            item = candidates[0]
+            return {
+                "ambiguous": True,
+                "display_name": item.get("display_name", raw),
+                "city_hint": city_hint,
+            }
+
     ranked = sorted(
         candidates,
         key=lambda item: _city_match_score(item, city_hint),
         reverse=True,
     )
     item = ranked[0]
-    score = _city_match_score(item, city_hint)
-
-    # Se l'utente ha indicato un comune ma Nominatim restituisce un altro comune,
-    # non avviamo la ricerca carburanti da un punto sbagliato.
-    if city_hint and score < 45:
-        return {
-            "ambiguous": True,
-            "display_name": item.get("display_name", raw),
-            "city_hint": city_hint,
-        }
 
     return {
         "lat": float(item["lat"]),
@@ -479,7 +559,7 @@ with st.form("search_form"):
 
     address = st.text_input(
         "Inserisci indirizzo",
-        placeholder="Esempio: Via Nomentana 150, Roma",
+        placeholder="Esempio: Via Nomentana 150 Roma",
         help="Per una ricerca più precisa inserisci via/piazza, numero civico, comune e, se serve, provincia.",
     )
 
@@ -518,7 +598,7 @@ if submitted:
     else:
         with st.spinner("Localizzo l'indirizzo e confronto i distributori..."):
             try:
-                location = geocode_address(address)
+                location = geocode_address_v2(address)
 
                 if not location:
                     st.session_state.pop("fuel_results", None)

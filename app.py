@@ -174,48 +174,66 @@ def _respect_nominatim_rate_limit():
 
 def _split_street_city(address: str):
     """
-    Prova a separare via/civico e comune dall'input dell'utente.
+    Separa strada/civico, comune ed eventuale provincia.
 
-    Gestisce sia:
-      - "Via Nomentana 150, Roma"
-      - "Via Nomentana 150 Roma"
-      - "Via Nomentana 150, Roma, RM"
+    Accetta formati naturali come:
+      - Via Nomentana 150 Roma
+      - Via Nomentana 150, Roma
+      - Via Nomentana 150 Roma RM
+      - Via Nomentana 150, Roma, RM
+      - Via Nomentana 150, Roma, RM.
+      - via nomentana 150, roma, rm.
 
-    Quando non ci sono virgole, usa il numero civico come punto di separazione.
+    La punteggiatura finale non viene interpretata come parte del comune/provincia.
     """
     raw = re.sub(r"\s+", " ", address.strip())
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+
+    def clean_piece(value: str) -> str:
+        value = value.strip()
+        # Rimuove punteggiatura accidentale a inizio/fine senza toccare
+        # apostrofi o trattini interni ai nomi.
+        value = re.sub(r"^[\s,;:.]+|[\s,;:.]+$", "", value)
+        return value.strip()
+
+    parts = [clean_piece(p) for p in raw.split(",")]
+    parts = [p for p in parts if p]
 
     if len(parts) >= 2:
-        # Se l'ultima parte sembra una sigla provincia (RM, MI, TO...), usa la penultima come comune.
-        if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2}", parts[-1]):
-            city = parts[-2]
+        last = clean_piece(parts[-1])
+
+        # Provincia: RM, RM., rm, ecc.
+        if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2}", last):
+            city = clean_piece(parts[-2])
             street = ", ".join(parts[:-2])
         else:
-            city = parts[-1]
+            city = last
             street = ", ".join(parts[:-1])
-        return street.strip(), city.strip()
 
-    # Caso senza virgole: separa dopo il civico.
-    # Esempi gestiti: 150, 150A, 150/A, 150-bis.
+        return clean_piece(street), clean_piece(city)
+
+    # Nessuna virgola: separa dopo il numero civico.
     match = re.match(
         r"^(.*?\b\d+[A-Za-z]?(?:/[A-Za-z0-9]+)?(?:-bis)?)\s+(.+)$",
         raw,
         flags=re.IGNORECASE,
     )
     if match:
-        street = match.group(1).strip()
-        city = match.group(2).strip()
+        street = clean_piece(match.group(1))
+        tail = clean_piece(match.group(2))
 
-        # Se l'utente termina con una sigla provincia, rimuovila dal comune.
-        city_parts = city.split()
-        if len(city_parts) >= 2 and re.fullmatch(r"[A-Za-z]{2}", city_parts[-1]):
-            city = " ".join(city_parts[:-1]).strip()
+        # Se termina con sigla provincia, la rimuove dal comune.
+        tail_parts = [clean_piece(x) for x in tail.split()]
+        tail_parts = [x for x in tail_parts if x]
 
-        return street, city
+        if len(tail_parts) >= 2:
+            province_candidate = re.sub(r"[^A-Za-z]", "", tail_parts[-1])
+            if re.fullmatch(r"[A-Za-z]{2}", province_candidate):
+                tail_parts = tail_parts[:-1]
 
-    return raw, None
+        city = " ".join(tail_parts).strip()
+        return street, city or None
 
+    return clean_piece(raw), None
 
 def _city_match_score(item, city_hint: str | None) -> int:
     if not city_hint:
@@ -322,7 +340,7 @@ def _nominatim_search(params):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocode_address_v3(address: str):
+def geocode_address_v4(address: str):
     """
     Geocodifica un indirizzo italiano tramite OpenStreetMap/Nominatim.
     Prima usa una ricerca strutturata (via + comune) per ridurre gli omonimi;
@@ -598,7 +616,7 @@ if submitted:
     else:
         with st.spinner("Localizzo l'indirizzo e confronto i distributori..."):
             try:
-                location = geocode_address_v3(address)
+                location = geocode_address_v4(address)
 
                 if not location:
                     st.session_state.pop("fuel_results", None)

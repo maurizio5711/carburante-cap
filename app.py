@@ -183,7 +183,7 @@ def _split_street_city(address: str):
 
     Quando non ci sono virgole, usa il numero civico come punto di separazione.
     """
-    raw = re.sub(r"\\s+", " ", address.strip())
+    raw = re.sub(r"\s+", " ", address.strip())
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
     if len(parts) >= 2:
@@ -199,7 +199,7 @@ def _split_street_city(address: str):
     # Caso senza virgole: separa dopo il civico.
     # Esempi gestiti: 150, 150A, 150/A, 150-bis.
     match = re.match(
-        r"^(.*?\\b\\d+[A-Za-z]?(?:/[A-Za-z0-9]+)?(?:-bis)?)\\s+(.+)$",
+        r"^(.*?\b\d+[A-Za-z]?(?:/[A-Za-z0-9]+)?(?:-bis)?)\s+(.+)$",
         raw,
         flags=re.IGNORECASE,
     )
@@ -322,7 +322,7 @@ def _nominatim_search(params):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocode_address_v2(address: str):
+def geocode_address_v3(address: str):
     """
     Geocodifica un indirizzo italiano tramite OpenStreetMap/Nominatim.
     Prima usa una ricerca strutturata (via + comune) per ridurre gli omonimi;
@@ -598,7 +598,7 @@ if submitted:
     else:
         with st.spinner("Localizzo l'indirizzo e confronto i distributori..."):
             try:
-                location = geocode_address_v2(address)
+                location = geocode_address_v3(address)
 
                 if not location:
                     st.session_state.pop("fuel_results", None)
